@@ -1185,3 +1185,137 @@ write.csv(
 
 cat("\n========== VARIANCE ANALYSIS COMPLETE ==========\n")
 
+
+# ============================================================
+# 26. DOES SALIENCE INCREASE VARIANCE OR ONLY THE MEAN?
+# ============================================================
+
+comparison <- variance_data %>%
+  mutate(
+    difference = salience_weighted_index -
+      restrictive_index
+  )
+
+# Numerical comparison
+results <- data.frame(
+  measure = c(
+    "Mean",
+    "Standard deviation",
+    "Variance",
+    "Minimum",
+    "Maximum"
+  ),
+  original = c(
+    mean(comparison$restrictive_index),
+    sd(comparison$restrictive_index),
+    var(comparison$restrictive_index),
+    min(comparison$restrictive_index),
+    max(comparison$restrictive_index)
+  ),
+  salience_weighted = c(
+    mean(comparison$salience_weighted_index),
+    sd(comparison$salience_weighted_index),
+    var(comparison$salience_weighted_index),
+    min(comparison$salience_weighted_index),
+    max(comparison$salience_weighted_index)
+  )
+)
+
+results$change <- results$salience_weighted -
+  results$original
+
+cat("\n========== COMPARISON ==========\n")
+print(round(results[-1], 4))
+
+cat("\n========== DIFFERENCE ==========\n")
+
+cat("Mean shift:",
+    round(mean(comparison$difference), 4), "\n")
+
+cat("SD of differences:",
+    round(sd(comparison$difference), 4), "\n")
+
+cat("Correlation:",
+    round(cor(
+      comparison$restrictive_index,
+      comparison$salience_weighted_index
+    ), 5), "\n")
+
+cat("Variance ratio:",
+    round(
+      var(comparison$salience_weighted_index) /
+        var(comparison$restrictive_index),
+      4
+    ), "\n")
+
+# ============================================================
+# 27. PLOT THE DIFFERENCE AGAINST ORIGINAL INDEX
+# ============================================================
+
+difference_plot <- ggplot(
+  comparison,
+  aes(
+    x = restrictive_index,
+    y = difference
+  )
+) +
+  geom_point(
+    alpha = 0.15,
+    size = 0.7
+  ) +
+  geom_smooth(
+    method = "loess",
+    se = TRUE,
+    color = "#c0392b"
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "How Much Does Salience Change the Index?",
+    subtitle = "Swedish voting districts, 2022",
+    x = "Original restrictive voting index",
+    y = "Salience-weighted minus original",
+    caption = "Positive values indicate higher scores after salience weighting"
+  ) +
+  theme_minimal(base_size = 12)
+
+print(difference_plot)
+
+ggsave(
+  file.path(
+    figure_dir,
+    "salience_index_difference_2022.png"
+  ),
+  plot = difference_plot,
+  width = 9,
+  height = 6,
+  dpi = 250
+)
+
+# ============================================================
+# 28. CHECK WHETHER SALIENCE CHANGES THE SPREAD
+# ============================================================
+
+variance_ratio <- var(
+  comparison$salience_weighted_index
+) / var(
+  comparison$restrictive_index
+)
+
+cat("\n========== VARIANCE INTERPRETATION ==========\n")
+
+cat(
+  "Variance change (%):",
+  round(100 * (variance_ratio - 1), 2),
+  "\n"
+)
+
+if (variance_ratio > 1) {
+  cat("Salience weighting increases geographical variance.\n")
+} else if (variance_ratio < 1) {
+  cat("Salience weighting decreases geographical variance.\n")
+} else {
+  cat("Geographical variance remains unchanged.\n")
+}
