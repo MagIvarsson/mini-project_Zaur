@@ -1,0 +1,257 @@
+
+# ============================================================
+# 03_read_party_assessment.R
+# CHES 2024 - Swedish Political Parties
+# Immigration Restrictiveness
+# ============================================================
+
+library(dplyr)
+
+# 1. FILE PATHS
+input_file <- "Data/Raw/Party_assesment/CHES_2024_final_v2.csv"
+output_dir <- "Data/Processed"
+
+if (!file.exists(input_file)) {
+  matches <- list.files(
+    "Data/Raw",
+    pattern = "^CHES_2024_final_v2\\.csv$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+
+  if (length(matches) != 1) {
+    stop("CHES file not found or multiple copies found.")
+  }
+
+  input_file <- matches[1]
+}
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# 2. READ CHES
+ches_raw <- read.csv(
+  input_file,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8-BOM"
+)
+
+cat("\n========== CHES DATA ==========\n")
+cat("Rows:", nrow(ches_raw), "\n")
+cat("Columns:", ncol(ches_raw), "\n")
+
+# Inspect country codes in the actual file
+cat("\nAvailable country codes:\n")
+print(sort(unique(as.character(ches_raw$country))))
+
+# 3. CHECK REQUIRED VARIABLES
+required_vars <- c(
+  "country", "party_id", "party",
+  "electionyear", "immigrate_policy",
+  "immigrate_salience", "multiculturalism",
+  "galtan", "lrgen"
+)
+
+missing_vars <- setdiff(required_vars, names(ches_raw))
+
+if (length(missing_vars) > 0) {
+  stop(
+    "Missing variables: ",
+    paste(missing_vars, collapse = ", ")
+  )
+}
+
+# 4. VERIFIED SWEDISH PARTY IDENTIFIERS
+party_lookup <- data.frame(
+  party_id = c(
+    1601, 1602, 1603, 1604,
+    1605, 1606, 1607, 1610
+  ),
+  expected_code = c(
+    "V", "SAP", "C", "L",
+    "M", "KD", "MP", "SD"
+  ),
+  election_party = c(
+    "Vänsterpartiet",
+    "Arbetarepartiet-Socialdemokraterna",
+    "Centerpartiet",
+    "Liberalerna (tidigare Folkpartiet)",
+    "Moderaterna",
+    "Kristdemokraterna",
+    "Miljöpartiet de gröna",
+    "Sverigedemokraterna"
+  )
+)
+
+# 5. SELECT SWEDISH PARTIES BY NUMERIC ID
+ches_sweden <- ches_raw %>%
+  mutate(
+    party_id = as.integer(party_id)
+  ) %>%
+  filter(
+    party_id %in% party_lookup$party_id
+  ) %>%
+  transmute(
+    country = as.character(country),
+    party_id,
+    ches_party = as.character(party),
+    electionyear,
+    immigrate_policy = as.numeric(immigrate_policy),
+    immigrate_salience = as.numeric(immigrate_salience),
+    multiculturalism = as.numeric(multiculturalism),
+    galtan = as.numeric(galtan),
+    lrgen = as.numeric(lrgen)
+  )
+
+cat("\n========== SWEDISH CHES RECORDS ==========\n")
+
+print(as.data.frame(ches_sweden), row.names = FALSE)
+
+cat("\nCountry codes for matched parties:\n")
+print(unique(ches_sweden$country))
+
+# 6. VALIDATE THE MATCHES
+if (nrow(ches_sweden) != 8) {
+  stop(
+    "Expected 8 Swedish CHES parties; found ",
+    nrow(ches_sweden)
+  )
+}
+
+if (anyDuplicated(ches_sweden$party_id)) {
+  stop("Duplicate CHES party IDs.")
+}
+
+party_assessment <- party_lookup %>%
+  left_join(
+    ches_sweden,
+    by = "party_id"
+  )
+
+# Verify that numeric IDs correspond to the
+# expected Swedish party abbreviations.
+if (any(
+  is.na(party_assessment$ches_party) |
+  party_assessment$ches_party !=
+    party_assessment$expected_code
+)) {
+  stop("Party ID and party abbreviation mismatch.")
+}
+
+if (any(is.na(party_assessment$immigrate_policy))) {
+  stop("Missing immigration-policy scores.")
+}
+
+if (any(
+  party_assessment$immigrate_policy < 0 |
+  party_assessment$immigrate_policy > 10
+)) {
+  stop("Immigration scores outside 0-10.")
+}
+
+if (length(unique(party_assessment$country)) != 1) {
+  stop("Matched parties have inconsistent country codes.")
+}
+
+cat("\n========== IMMIGRATION RESTRICTIVENESS ==========\n")
+
+print(
+  as.data.frame(
+    party_assessment %>%
+      select(
+        election_party,
+        ches_party,
+        immigrate_policy,
+        immigrate_salience,
+        multiculturalism
+      ) %>%
+      arrange(immigrate_policy)
+  ),
+  row.names = FALSE
+)
+
+# 7. VALIDATE AGAINST ELECTION RESULTS
+votes_file <- file.path(
+  output_dir,
+  "election_2022_party_shares.csv"
+)
+
+if (!file.exists(votes_file)) {
+  stop("Run script 02 before script 03.")
+}
+
+party_votes <- read.csv(
+  votes_file,
+  colClasses = c(Lkfv = "character"),
+  stringsAsFactors = FALSE
+)
+
+# Attach actual CHES expert scores to party votes
+votes_with_ches <- party_votes %>%
+  left_join(
+    party_assessment %>%
+      select(election_party, immigrate_policy),
+    by = c("party" = "election_party")
+  )
+
+# Check that the join did not duplicate rows
+if (nrow(votes_with_ches) != nrow(party_votes)) {
+  stop("Party join duplicated election observations.")
+}
+
+# 8. CALCULATE CHES COVERAGE
+coverage <- votes_with_ches %>%
+  group_by(Lkfv) %>%
+  summarise(
+    total_votes = sum(votes),
+    assessed_votes = sum(
+      votes[!is.na(immigrate_policy)]
+    ),
+    ches_coverage = assessed_votes / total_votes,
+    .groups = "drop"
+  )
+
+cat("\n========== CHES VOTE COVERAGE ==========\n")
+
+print(summary(coverage$ches_coverage))
+
+cat(
+  "\nDistricts with coverage below 90%:",
+  sum(coverage$ches_coverage < 0.90),
+  "\n"
+)
+
+cat(
+  "Districts with coverage below 95%:",
+  sum(coverage$ches_coverage < 0.95),
+  "\n"
+)
+
+cat(
+  "Districts with coverage below 99%:",
+  sum(coverage$ches_coverage < 0.99),
+  "\n"
+)
+
+# 9. SAVE VERIFIED FILES
+write.csv(
+  ches_sweden,
+  file.path(output_dir, "ches_sweden_2024.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  party_assessment,
+  file.path(output_dir, "party_assessment_2024.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  coverage,
+  file.path(output_dir, "ches_vote_coverage_2022.csv"),
+  row.names = FALSE
+)
+
+cat("\n========== SCRIPT 03 COMPLETE ==========\n")
+cat("Matched CHES parties:", nrow(party_assessment), "\n")
+cat("Districts assessed:", nrow(coverage), "\n")
+cat("Files saved in:", output_dir, "\n")
