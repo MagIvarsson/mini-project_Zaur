@@ -349,3 +349,126 @@ cat(
 )
 
 cat("\nFiles saved in:", output_dir, "\n")
+install.packages(c("leaflet", "htmlwidgets"))
+
+# ============================================================
+# 15. INTERACTIVE MAP - SD VOTE SHARE 2022
+# ============================================================
+
+library(leaflet)
+library(htmlwidgets)
+
+figure_dir <- "Outputs/Figures"
+
+dir.create(
+  figure_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# Extract SD votes for each district
+sd_votes <- party_votes %>%
+  filter(party == "Sverigedemokraterna") %>%
+  select(
+    Lkfv,
+    sd_votes = votes
+  )
+
+# Join district totals and SD votes to the GIS
+sd_map_data <- gis %>%
+  left_join(
+    district_totals,
+    by = "Lkfv"
+  ) %>%
+  left_join(
+    sd_votes,
+    by = "Lkfv"
+  ) %>%
+  mutate(
+    sd_votes = if_else(
+      !is.na(valid_votes) & is.na(sd_votes),
+      0,
+      sd_votes
+    ),
+    sd_share_pct = if_else(
+      valid_votes > 0,
+      100 * sd_votes / valid_votes,
+      NA_real_
+    )
+  )
+
+# Check results
+cat("\n========== SD MAP ==========\n")
+cat("Total districts:", nrow(sd_map_data), "\n")
+cat("Districts with SD share:",
+    sum(!is.na(sd_map_data$sd_share_pct)), "\n")
+
+print(summary(sd_map_data$sd_share_pct))
+
+# Simplify polygons for faster map loading
+sd_map_data <- st_simplify(
+  sd_map_data,
+  dTolerance = 20,
+  preserveTopology = TRUE
+)
+
+# Convert to coordinates used by Leaflet
+sd_map_data <- st_transform(
+  sd_map_data,
+  4326
+)
+
+# Color scale
+pal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = c(0, 60),
+  na.color = "#cccccc"
+)
+
+# Popup information
+sd_map_data$popup <- paste0(
+  "<b>District:</b> ", sd_map_data$Vdnamn,
+  "<br><b>Municipality:</b> ", sd_map_data$municipality,
+  "<br><b>District ID:</b> ", sd_map_data$Lkfv,
+  "<br><b>SD vote share:</b> ",
+  round(sd_map_data$sd_share_pct, 1), "%",
+  "<br><b>SD votes:</b> ", sd_map_data$sd_votes,
+  "<br><b>Valid party votes:</b> ", sd_map_data$valid_votes
+)
+
+# Generate interactive map
+sd_map <- leaflet(sd_map_data) %>%
+  addProviderTiles(
+    providers$CartoDB.Positron
+  ) %>%
+  addPolygons(
+    fillColor = ~pal(sd_share_pct),
+    fillOpacity = 0.8,
+    color = "#555555",
+    weight = 0.25,
+    popup = ~popup,
+    highlightOptions = highlightOptions(
+      weight = 1.5,
+      color = "black",
+      bringToFront = TRUE
+    )
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = c(0, 60),
+    title = "SD vote share (%)",
+    opacity = 1
+  )
+
+# Save interactive HTML map
+saveWidget(
+  sd_map,
+  file = file.path(
+    figure_dir,
+    "interactive_sd_vote_2022.html"
+  ),
+  selfcontained = FALSE
+)
+
+cat("\nInteractive SD map saved successfully!\n")
