@@ -530,3 +530,328 @@ cat("\n========== ANALYSIS COMPLETED ==========\n")
 cat("Restrictive index calculated.\n")
 cat("Static map generated.\n")
 cat("Interactive map generated.\n")
+
+
+
+# ============================================================
+# 15. SALIENCE-WEIGHTED RESTRICTIVE VOTING INDEX
+# ============================================================
+
+# Check the CHES variables
+if (anyNA(party_assessment$immigrate_policy) ||
+    anyNA(party_assessment$immigrate_salience)) {
+  stop("Missing CHES policy or salience scores.")
+}
+
+if (any(party_assessment$immigrate_salience < 0 |
+        party_assessment$immigrate_salience > 10)) {
+  stop("CHES salience scores outside 0-10.")
+}
+
+# Add policy restrictiveness and policy salience to votes
+votes_salience <- party_votes %>%
+  left_join(
+    party_assessment %>%
+      select(
+        election_party,
+        immigrate_policy,
+        immigrate_salience
+      ),
+    by = c("party" = "election_party")
+  )
+
+if (nrow(votes_salience) != nrow(party_votes)) {
+  stop("CHES join duplicated vote observations.")
+}
+
+# Calculate the salience-weighted index per district
+salience_scores <- votes_salience %>%
+  group_by(Lkfv) %>%
+  summarise(
+    salience_weighted_votes = sum(
+      votes * immigrate_salience,
+      na.rm = TRUE
+    ),
+
+    salience_weighted_score_sum = sum(
+      votes * immigrate_policy * immigrate_salience,
+      na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  ) %>%
+  left_join(
+    district_scores %>%
+      select(
+        Lkfv,
+        municipality,
+        district_name,
+        total_votes,
+        assessed_votes,
+        ches_coverage,
+        coverage_ok,
+        restrictive_index
+      ),
+    by = "Lkfv"
+  ) %>%
+  mutate(
+    salience_weighted_index = if_else(
+      salience_weighted_votes > 0,
+      salience_weighted_score_sum /
+        salience_weighted_votes,
+      NA_real_
+    ),
+
+    # Difference between the two indices
+    salience_effect = salience_weighted_index -
+      restrictive_index,
+
+    # Apply the same coverage threshold
+    salience_map_score = if_else(
+      coverage_ok %in% TRUE,
+      salience_weighted_index,
+      NA_real_
+    )
+  )
+
+# Validate results
+if (nrow(salience_scores) != 6264 ||
+    anyDuplicated(salience_scores$Lkfv)) {
+  stop("Unexpected number of districts or duplicate IDs.")
+}
+
+if (anyNA(salience_scores$salience_weighted_index)) {
+  stop("Some districts have no salience-weighted score.")
+}
+
+if (any(
+  salience_scores$salience_weighted_index < 0 |
+  salience_scores$salience_weighted_index > 10
+)) {
+  stop("Salience-weighted index outside 0-10.")
+}
+
+# ============================================================
+# 16. COMPARE ORIGINAL AND SALIENCE-WEIGHTED INDICES
+# ============================================================
+
+cat("\n========== INDEX COMPARISON ==========\n")
+
+print(
+  summary(
+    salience_scores %>%
+      select(
+        restrictive_index,
+        salience_weighted_index,
+        salience_effect
+      )
+  )
+)
+
+cat(
+  "\nCorrelation between indices:",
+  cor(
+    salience_scores$restrictive_index,
+    salience_scores$salience_weighted_index
+  ),
+  "\n"
+)
+
+cat(
+  "Districts included in primary maps:",
+  sum(salience_scores$coverage_ok),
+  "\n"
+)
+
+# Save the new dataset
+write.csv(
+  salience_scores,
+  file.path(
+    output_dir,
+    "salience_weighted_restrictive_index_2022.csv"
+  ),
+  row.names = FALSE
+)
+
+# ============================================================
+# 17. JOIN THE NEW INDEX WITH GIS
+# ============================================================
+
+salience_map_data <- map_data %>%
+  left_join(
+    salience_scores %>%
+      select(
+        Lkfv,
+        salience_weighted_index,
+        salience_effect,
+        salience_map_score
+      ),
+    by = "Lkfv"
+  )
+
+if (nrow(salience_map_data) != 6264) {
+  stop("GIS join changed the number of districts.")
+}
+
+# Save spatial dataset
+st_write(
+  salience_map_data,
+  file.path(
+    output_dir,
+    "salience_weighted_voting_2022.gpkg"
+  ),
+  delete_dsn = TRUE,
+  quiet = TRUE
+)
+
+# ============================================================
+# 18. STATIC MAP
+# ============================================================
+
+salience_static_map <- ggplot(salience_map_data) +
+  geom_sf(
+    aes(fill = salience_map_score),
+    color = NA
+  ) +
+  scale_fill_gradient(
+    low = "#fee8c8",
+    high = "#b30000",
+    limits = c(0, 10),
+    na.value = "grey75",
+    name = "Restrictiveness\nindex"
+  ) +
+  labs(
+    title = "Salience-Weighted Restrictive Voting",
+    subtitle = "Sweden, 2022 Riksdag Election",
+    caption = paste(
+      "CHES 2024 immigration-policy restrictiveness",
+      "weighted by party votes and policy salience.",
+      "Grey: CHES coverage below 90%."
+    )
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(
+      size = 16,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(size = 11),
+    plot.caption = element_text(size = 8)
+  )
+
+ggsave(
+  file.path(
+    figure_dir,
+    "salience_weighted_restrictive_map_2022.png"
+  ),
+  plot = salience_static_map,
+  width = 9,
+  height = 12,
+  dpi = 250
+)
+
+# ============================================================
+# 19. INTERACTIVE SALIENCE-WEIGHTED MAP
+# ============================================================
+
+salience_interactive <- st_simplify(
+  salience_map_data,
+  dTolerance = 30,
+  preserveTopology = TRUE
+)
+
+salience_interactive <- st_transform(
+  salience_interactive,
+  4326
+)
+
+# Fixed 0-10 scale
+salience_pal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = c(0, 10),
+  na.color = "#bdbdbd"
+)
+
+# Popup comparing the two indices
+salience_interactive$popup_salience <- paste0(
+  "<b>District:</b> ",
+  salience_interactive$district_name,
+
+  "<br><b>Municipality:</b> ",
+  salience_interactive$municipality,
+
+  "<br><b>District ID:</b> ",
+  salience_interactive$Lkfv,
+
+  "<br><b>Original index:</b> ",
+  sprintf(
+    "%.2f",
+    salience_interactive$restrictive_index
+  ),
+
+  "<br><b>Salience-weighted index:</b> ",
+  sprintf(
+    "%.2f",
+    salience_interactive$salience_weighted_index
+  ),
+
+  "<br><b>Difference:</b> ",
+  sprintf(
+    "%+.2f",
+    salience_interactive$salience_effect
+  ),
+
+  "<br><b>CHES vote coverage:</b> ",
+  sprintf(
+    "%.1f%%",
+    100 * salience_interactive$ches_coverage
+  )
+)
+
+# Create interactive map
+salience_map <- leaflet(salience_interactive) %>%
+  addProviderTiles(
+    providers$CartoDB.Positron
+  ) %>%
+  addPolygons(
+    fillColor = ~salience_pal(salience_map_score),
+    fillOpacity = 0.85,
+    color = "#555555",
+    weight = 0.2,
+    popup = ~popup_salience,
+    highlightOptions = highlightOptions(
+      color = "black",
+      weight = 1.5,
+      bringToFront = TRUE
+    )
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = salience_pal,
+    values = c(0, 10),
+    title = "Salience-weighted index",
+    opacity = 0.9
+  ) %>%
+  addControl(
+    html = paste0(
+      "<b>Swedish Riksdag Election 2022</b>",
+      "<br>Salience-weighted restrictive voting",
+      "<br><small>Grey: CHES coverage below 90%</small>"
+    ),
+    position = "topright"
+  )
+
+# Save HTML
+saveWidget(
+  salience_map,
+  file = file.path(
+    figure_dir,
+    "interactive_salience_weighted_2022.html"
+  ),
+  selfcontained = FALSE
+)
+
+cat("\n========== SALIENCE ANALYSIS COMPLETED ==========\n")
+cat("Salience-weighted index saved.\n")
+cat("Static map saved.\n")
+cat("Interactive map saved.\n")
