@@ -855,3 +855,333 @@ cat("\n========== SALIENCE ANALYSIS COMPLETED ==========\n")
 cat("Salience-weighted index saved.\n")
 cat("Static map saved.\n")
 cat("Interactive map saved.\n")
+
+
+
+# ============================================================
+# 20. COMPARE VARIANCE OF THE TWO INDICES
+# ============================================================
+
+# Compare the SAME districts for both indices.
+# Use the primary sample: CHES coverage >= 90%.
+
+variance_data <- salience_scores %>%
+  filter(
+    coverage_ok %in% TRUE,
+    is.finite(restrictive_index),
+    is.finite(salience_weighted_index)
+  )
+
+if (nrow(variance_data) < 2) {
+  stop("Not enough districts to compare variance.")
+}
+
+# Prepare data in long format
+variance_long <- bind_rows(
+  variance_data %>%
+    transmute(
+      index_type = "Original index",
+      score = restrictive_index
+    ),
+
+  variance_data %>%
+    transmute(
+      index_type = "Salience-weighted index",
+      score = salience_weighted_index
+    )
+)
+
+# 21. DESCRIPTIVE STATISTICS
+
+variance_summary <- variance_long %>%
+  group_by(index_type) %>%
+  summarise(
+    n = n(),
+    mean = mean(score),
+    variance = var(score),
+    sd = sd(score),
+    iqr = IQR(score),
+    p05 = as.numeric(quantile(score, 0.05)),
+    p95 = as.numeric(quantile(score, 0.95)),
+    min = min(score),
+    max = max(score),
+    .groups = "drop"
+  )
+
+cat("\n========== VARIANCE COMPARISON ==========\n")
+
+print(as.data.frame(variance_summary), row.names = FALSE)
+
+# Extract the two variances
+var_original <- var(
+  variance_data$restrictive_index
+)
+
+var_salience <- var(
+  variance_data$salience_weighted_index
+)
+
+sd_original <- sd(
+  variance_data$restrictive_index
+)
+
+sd_salience <- sd(
+  variance_data$salience_weighted_index
+)
+
+# Relative difference in variance
+variance_ratio <- var_salience / var_original
+
+variance_change_pct <- 100 * (
+  var_salience - var_original
+) / var_original
+
+cat("\n========== MAIN RESULTS ==========\n")
+
+cat(
+  "Number of districts:",
+  nrow(variance_data), "\n"
+)
+
+cat(
+  "Original variance:",
+  round(var_original, 4), "\n"
+)
+
+cat(
+  "Salience-weighted variance:",
+  round(var_salience, 4), "\n"
+)
+
+cat(
+  "Original SD:",
+  round(sd_original, 4), "\n"
+)
+
+cat(
+  "Salience-weighted SD:",
+  round(sd_salience, 4), "\n"
+)
+
+cat(
+  "Variance ratio:",
+  round(variance_ratio, 4), "\n"
+)
+
+cat(
+  "Change in variance:",
+  round(variance_change_pct, 2), "%\n"
+)
+
+if (variance_ratio > 1) {
+  cat("\nRESULT: Salience weighting INCREASES variance.\n")
+} else if (variance_ratio < 1) {
+  cat("\nRESULT: Salience weighting DECREASES variance.\n")
+} else {
+  cat("\nRESULT: Variance is unchanged.\n")
+}
+
+# ============================================================
+# 22. VISUALIZE DISTRIBUTIONS
+# ============================================================
+
+distribution_plot <- ggplot(
+  variance_long,
+  aes(
+    x = score,
+    fill = index_type
+  )
+) +
+  geom_density(
+    alpha = 0.4,
+    color = NA
+  ) +
+  labs(
+    title = "Distribution of Restrictive Voting Indices",
+    subtitle = "Swedish voting districts, Riksdag election 2022",
+    x = "Restrictive voting index (0-10)",
+    y = "Density",
+    fill = "Index",
+    caption = "Only districts with CHES vote coverage >= 90%"
+  ) +
+  coord_cartesian(xlim = c(0, 10)) +
+  theme_minimal(base_size = 12)
+
+print(distribution_plot)
+
+ggsave(
+  file.path(
+    figure_dir,
+    "original_vs_salience_distribution_2022.png"
+  ),
+  plot = distribution_plot,
+  width = 10,
+  height = 6,
+  dpi = 250
+)
+
+# ============================================================
+# 23. SCATTERPLOT: ORIGINAL VS SALIENCE-WEIGHTED
+# ============================================================
+
+comparison_plot <- ggplot(
+  variance_data,
+  aes(
+    x = restrictive_index,
+    y = salience_weighted_index
+  )
+) +
+  geom_point(
+    alpha = 0.15,
+    size = 0.8
+  ) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed"
+  ) +
+  coord_equal(
+    xlim = c(0, 10),
+    ylim = c(0, 10)
+  ) +
+  labs(
+    title = "Does Policy Salience Change Restrictive Voting?",
+    subtitle = "Each point represents one voting district",
+    x = "Original restrictive voting index",
+    y = "Salience-weighted restrictive voting index"
+  ) +
+  theme_minimal(base_size = 12)
+
+print(comparison_plot)
+
+ggsave(
+  file.path(
+    figure_dir,
+    "original_vs_salience_scatter_2022.png"
+  ),
+  plot = comparison_plot,
+  width = 8,
+  height = 8,
+  dpi = 250
+)
+
+# ============================================================
+# 24. WITHIN-MUNICIPALITY VARIANCE COMPARISON
+# ============================================================
+
+municipality_variance <- variance_data %>%
+  group_by(municipality) %>%
+  summarise(
+    n_districts = n(),
+
+    original_variance = if (n() >= 2) {
+      var(restrictive_index)
+    } else {
+      NA_real_
+    },
+
+    salience_variance = if (n() >= 2) {
+      var(salience_weighted_index)
+    } else {
+      NA_real_
+    },
+
+    .groups = "drop"
+  ) %>%
+  filter(n_districts >= 5) %>%
+  mutate(
+    variance_difference =
+      salience_variance - original_variance,
+
+    variance_ratio = if_else(
+      original_variance > 0,
+      salience_variance / original_variance,
+      NA_real_
+    ),
+
+    variance_increased =
+      salience_variance > original_variance
+  )
+
+cat("\n========== MUNICIPALITY COMPARISON ==========\n")
+
+cat(
+  "Municipalities with at least 5 districts:",
+  nrow(municipality_variance), "\n"
+)
+
+cat(
+  "Municipalities with increased variance:",
+  sum(municipality_variance$variance_increased),
+  "\n"
+)
+
+cat(
+  "Municipalities with decreased variance:",
+  sum(
+    municipality_variance$salience_variance <
+      municipality_variance$original_variance
+  ),
+  "\n"
+)
+
+# Municipalities with largest absolute increases
+cat("\nTOP 10: LARGEST INCREASES IN VARIANCE\n")
+
+print(
+  municipality_variance %>%
+    arrange(desc(variance_difference)) %>%
+    select(
+      municipality,
+      n_districts,
+      original_variance,
+      salience_variance,
+      variance_difference,
+      variance_ratio
+    ) %>%
+    head(10),
+  n = 10
+)
+
+# Municipalities with largest absolute decreases
+cat("\nTOP 10: LARGEST DECREASES IN VARIANCE\n")
+
+print(
+  municipality_variance %>%
+    arrange(variance_difference) %>%
+    select(
+      municipality,
+      n_districts,
+      original_variance,
+      salience_variance,
+      variance_difference,
+      variance_ratio
+    ) %>%
+    head(10),
+  n = 10
+)
+
+# ============================================================
+# 25. SAVE VARIANCE RESULTS
+# ============================================================
+
+write.csv(
+  variance_summary,
+  file.path(
+    output_dir,
+    "index_variance_comparison_2022.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  municipality_variance,
+  file.path(
+    output_dir,
+    "municipality_index_variance_2022.csv"
+  ),
+  row.names = FALSE
+)
+
+cat("\n========== VARIANCE ANALYSIS COMPLETE ==========\n")
+
