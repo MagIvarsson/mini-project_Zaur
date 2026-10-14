@@ -255,3 +255,278 @@ cat("\n========== SCRIPT 03 COMPLETE ==========\n")
 cat("Matched CHES parties:", nrow(party_assessment), "\n")
 cat("Districts assessed:", nrow(coverage), "\n")
 cat("Files saved in:", output_dir, "\n")
+install.packages(c("ggplot2", "leaflet", "htmlwidgets"))
+
+# ============================================================
+# 10. CALCULATE DISTRICT RESTRICTIVE VOTING INDEX
+# ============================================================
+
+library(sf)
+library(ggplot2)
+library(leaflet)
+library(htmlwidgets)
+
+figure_dir <- "Outputs/Figures"
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Weighted average of CHES immigration policy scores
+# using votes for the 8 assessed parliamentary parties.
+
+district_scores <- votes_with_ches %>%
+  group_by(Lkfv) %>%
+  summarise(
+    municipality = first(municipality),
+    district_name = first(district_name),
+
+    total_votes = sum(votes),
+
+    assessed_votes = sum(
+      votes[!is.na(immigrate_policy)]
+    ),
+
+    weighted_sum = sum(
+      votes * immigrate_policy,
+      na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ches_coverage = assessed_votes / total_votes,
+
+    restrictive_index = if_else(
+      assessed_votes > 0,
+      weighted_sum / assessed_votes,
+      NA_real_
+    ),
+
+    coverage_ok = !is.na(ches_coverage) &
+      ches_coverage >= 0.90
+  )
+
+# Check results
+cat("\n========== RESTRICTIVE VOTING INDEX ==========\n")
+
+print(summary(district_scores$restrictive_index))
+
+cat("Total districts:", nrow(district_scores), "\n")
+
+cat(
+  "Districts with CHES coverage >= 90%:",
+  sum(district_scores$coverage_ok), "\n"
+)
+
+cat(
+  "Districts below 90% coverage:",
+  sum(!district_scores$coverage_ok), "\n"
+)
+
+# Validate scores
+if (any(
+  district_scores$restrictive_index < 0 |
+  district_scores$restrictive_index > 10,
+  na.rm = TRUE
+)) {
+  stop("Restrictive index outside the 0-10 range.")
+}
+
+if (nrow(district_scores) != 6264 ||
+    anyDuplicated(district_scores$Lkfv)) {
+  stop("Unexpected number of districts or duplicate IDs.")
+}
+
+# Save the index
+write.csv(
+  district_scores,
+  file.path(output_dir, "restrictive_index_2022.csv"),
+  row.names = FALSE
+)
+
+# ============================================================
+# 11. MERGE RESTRICTIVE INDEX WITH GIS
+# ============================================================
+
+gis <- st_read(
+  "Data/Processed/districts_2022.gpkg",
+  quiet = TRUE
+)
+
+gis$Lkfv <- as.character(gis$Lkfv)
+
+map_data <- gis %>%
+  left_join(
+    district_scores,
+    by = "Lkfv"
+  ) %>%
+  mutate(
+    # Primary map shows districts with >=90% coverage
+    map_score = if_else(
+      coverage_ok %in% TRUE,
+      restrictive_index,
+      NA_real_
+    )
+  )
+
+if (nrow(map_data) != nrow(gis)) {
+  stop("GIS join unexpectedly changed district count.")
+}
+
+cat("\n========== GIS MATCH ==========\n")
+
+cat("District polygons:", nrow(map_data), "\n")
+cat(
+  "Matched restrictive scores:",
+  sum(!is.na(map_data$restrictive_index)), "\n"
+)
+
+# Save map-ready spatial data
+st_write(
+  map_data,
+  file.path(output_dir, "restrictive_voting_2022.gpkg"),
+  delete_dsn = TRUE,
+  quiet = TRUE
+)
+
+# ============================================================
+# 12. STATIC MAP OF RESTRICTIVE VOTING
+# ============================================================
+
+static_map <- ggplot(map_data) +
+  geom_sf(
+    aes(fill = map_score),
+    color = NA
+  ) +
+  scale_fill_gradient(
+    low = "#fee8c8",
+    high = "#b30000",
+    na.value = "grey75",
+    name = "Restrictiveness\nindex"
+  ) +
+  labs(
+    title = "Immigration-Restrictive Voting in Sweden",
+    subtitle = "2022 Riksdag Election",
+    caption = paste(
+      "Vote-weighted CHES 2024 party scores.",
+      "Grey: CHES vote coverage below 90%."
+    )
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(
+      size = 16,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(size = 11),
+    plot.caption = element_text(size = 8)
+  )
+
+ggsave(
+  file.path(
+    figure_dir,
+    "restrictive_voting_map_2022.png"
+  ),
+  plot = static_map,
+  width = 9,
+  height = 12,
+  dpi = 250
+)
+
+# ============================================================
+# 13. INTERACTIVE RESTRICTIVE VOTING MAP
+# ============================================================
+
+# Simplify polygons to improve loading speed
+interactive_data <- st_simplify(
+  map_data,
+  dTolerance = 30,
+  preserveTopology = TRUE
+)
+
+# Transform to WGS84 for Leaflet
+interactive_data <- st_transform(
+  interactive_data,
+  4326
+)
+
+# Color scale
+pal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = interactive_data$map_score,
+  na.color = "#bdbdbd"
+)
+
+# District information displayed when clicked
+interactive_data$popup <- paste0(
+  "<b>Voting district:</b> ",
+  interactive_data$Vdnamn,
+
+  "<br><b>Municipality:</b> ",
+  interactive_data$municipality,
+
+  "<br><b>District ID:</b> ",
+  interactive_data$Lkfv,
+
+  "<br><b>Restrictiveness index:</b> ",
+  sprintf("%.2f", interactive_data$restrictive_index),
+
+  "<br><b>CHES vote coverage:</b> ",
+  sprintf("%.1f%%", 100 * interactive_data$ches_coverage),
+
+  "<br><b>Total party votes:</b> ",
+  interactive_data$total_votes,
+
+  "<br><b>Coverage:</b> ",
+  ifelse(
+    interactive_data$coverage_ok,
+    "Included",
+    "Below 90% threshold"
+  )
+)
+
+# Create interactive map
+restrictive_map <- leaflet(interactive_data) %>%
+  addProviderTiles(
+    providers$CartoDB.Positron
+  ) %>%
+  addPolygons(
+    fillColor = ~pal(map_score),
+    fillOpacity = 0.85,
+    color = "#555555",
+    weight = 0.2,
+    popup = ~popup,
+    highlightOptions = highlightOptions(
+      color = "black",
+      weight = 1.5,
+      bringToFront = TRUE
+    )
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = ~map_score,
+    title = "Restrictiveness index",
+    opacity = 0.9
+  ) %>%
+  addControl(
+    html = paste0(
+      "<b>Swedish Election 2022</b>",
+      "<br>Immigration-restrictive voting",
+      "<br><small>Grey: coverage below 90%</small>"
+    ),
+    position = "topright"
+  )
+
+# Save interactive map
+saveWidget(
+  restrictive_map,
+  file = file.path(
+    figure_dir,
+    "interactive_restrictive_voting_2022.html"
+  ),
+  selfcontained = FALSE
+)
+
+cat("\n========== ANALYSIS COMPLETED ==========\n")
+cat("Restrictive index calculated.\n")
+cat("Static map generated.\n")
+cat("Interactive map generated.\n")
