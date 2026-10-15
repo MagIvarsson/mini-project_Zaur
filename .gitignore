@@ -4,3 +4,4 @@
 /Data/Processed/
 
 .DS_Store
+.env
